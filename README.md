@@ -3,8 +3,7 @@ Taxi-out time prediction for the PRC Data Challenge 2026,
 organised by the EUROCONTROL Performance Review Commission and the OpenSky Network.
 Task. Predict `TAXITIME_SEC_mvt = MVT_TIME_UTC_mvt − BLOCK_TIME_UTC_mvt` for
 344,841 departures at ten major European airports in January and July 2026,
-training on 4.17 million movements from 2025. Ranked by RMSE in seconds.
-Best official score: 299.23 s — rank 91 of 191 teams, reached with 8 submissions (the median team used 8 submissions and ranks 134th).
+training on 4.17 million movements from 2025.
 ---
 What this solution is about
 The central finding is that the error is not spread evenly across flights.
