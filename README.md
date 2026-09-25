@@ -3,6 +3,17 @@
 Taxi-out time prediction for the [PRC Data Challenge 2026](https://prc-data-challenge-2026.netlify.app/),
 organised by the EUROCONTROL Performance Review Commission and the OpenSky Network.
 
+Team & Acknowledgments
+
+This repository is the official entry of the joyous-rainbow team for the data challenge.
+
+Team members:
+
+Rade Kačar — University of Belgrade, Faculty of Transport and Traffic Engineering
+Darko Ćulibrk — MTEL Banja Luka
+
+We thank the challenge organizers and the open-source community for providing the tools and datasets that made this solution possible.
+
 **Task.** Predict `TAXITIME\_SEC\_mvt = MVT\_TIME\_UTC\_mvt − BLOCK\_TIME\_UTC\_mvt` for
 344,841 departures at ten major European airports in January and July 2026,
 training on 4.17 million movements from 2025. Ranked by RMSE in seconds.
@@ -214,22 +225,7 @@ External sources, all openly licensed:
 * **Iowa Environmental Mesonet** — ASOS/METAR archive, hourly observations for the ten airports
 * **OpenStreetMap contributors** — parking positions, taxiways and runways, via the Overpass API (ODbL)
 
-## Attribution of ideas
 
-The solution is original and written from scratch. Two ideas came from the publicly
-documented work of other teams in this challenge and were implemented independently here:
-LightGBM's linear leaves, and the classifier-weighted mixture for the fallback regime
-(team kind-mango, whose repository documents both along with a long list of measured
-failures). Their implementation differs from ours in an important respect — that team
-deliberately avoids the Network Manager off-block field altogether, while this solution
-uses it.
-
-On that field: `MVT\_TIME\_UTC\_mvt − AOBT\_3\_flt` is this model's strongest single feature,
-and it approximates the blanked block time. The challenge brief cautions against it; asked
-directly, the organisers stated on 2026-09-18 that no such restriction exists and that
-even reconstructing off-block times from open trajectory data is acceptable, the model
-being intended for post-operations analysis rather than tactical use. The field is
-therefore used here, and this note records the choice openly.
 
 ## Licence
 
