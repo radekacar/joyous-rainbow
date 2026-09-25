@@ -1,0 +1,16 @@
+# challenge data and everything derived from it is not redistributable
+data/
+cache/
+*.parquet
+optuna_taxiout.db
+figures/
+
+# credentials must never be committed
+upload.py
+*.key
+.env
+
+__pycache__/
+*.pyc
+.venv/
+.idea/
