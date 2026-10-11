@@ -1,16 +1,40 @@
-# challenge data and everything derived from it is not redistributable
+# Challenge data. The licence for the PRC Data Challenge 2026 dataset does not
+# permit redistribution, so nothing from data/ may ever be committed.
 data/
-cache/
 *.parquet
-optuna_taxiout.db
-figures/
+*.csv
 
-# credentials must never be committed
-upload.py
+# Derived features and weather, rebuilt by the pipeline in minutes
+cache/
+*.db
+*.sqlite3
+*.sqlite
+
+# Credentials. keys.txt is read by upload.py and must stay local.
+keys.txt
 *.key
+*.pem
 .env
+.env.*
+upload_*private*.py
 
+# Figures and submission artefacts are regenerated, not stored
+*.png
+*.pdf
+*.docx
+*.zip
+
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
 .venv/
+venv/
+env/
+.ipynb_checkpoints/
+
+# Editors and operating systems
 .idea/
+.vscode/
+.DS_Store
+Thumbs.db

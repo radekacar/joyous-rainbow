@@ -1,236 +1,257 @@
-# prc-taxiout-2026 — team joyous-rainbow
+# Taxi-out time at ten European airports — PRC Data Challenge 2026
 
-Taxi-out time prediction for the [PRC Data Challenge 2026](https://prc-data-challenge-2026.netlify.app/),
-organised by the EUROCONTROL Performance Review Commission and the OpenSky Network.
+Team **joyous-rainbow**. Single-file LightGBM pipeline, plus the measurements
+that decided what went into it and what was thrown out.
 
-Team & Acknowledgments
+## What the task actually is
 
-This repository is the official entry of the joyous-rainbow team for the data challenge.
+The challenge asks for `TAXITIME_SEC_mvt` of departures already flown, at
+EDDF, EDDM, EGLL, EHAM, LEBL, LEMD, LFPG, LIRF, LSZH and LTFM.
 
-Team members:
+This is **post-operations estimation, not forecasting**. Every prediction is
+made with the take-off time of the flight itself in hand, and with the airport's
+whole movement log around it. A model that predicts taxi-out *before pushback* —
+the problem an air traffic controller or an airline dispatcher has — gets none of
+that, and the numbers here say nothing about how well such a model would do. The
+distinction matters, because the single most informative feature in this solution
+is one that forecasting cannot use.
 
-Rade Kačar — University of Belgrade, Faculty of Transport and Traffic Engineering
-Darko Ćulibrk — MTEL Banja Luka
+In the data, `TAXITIME_SEC_mvt` equals `MVT_TIME_UTC_mvt - BLOCK_TIME_UTC_mvt`
+for **100.00 %** of training departures: take-off minus off-block, exactly, with
+no exceptions in 2,085,047 rows. The off-block field is blanked for departures in
+the prediction set. So the target is one subtraction away from a field that was
+removed, and the task is to reconstruct it.
 
-We thank the challenge organizers and the open-source community for providing the tools and datasets that made this solution possible.
+The Network Manager data gives a second, independent measurement of the same
+event: `AOBT_3_flt`, EUROCONTROL's own actual off-block time. Predicting
+`MVT_TIME - AOBT_3` directly — using one system's measurement in place of the
+other's — gives RMSE **428.2 s**, and **413.6 s** after a per-airport offset. The
+two systems agree within 30 seconds on only 10.3 % of flights, and within ten
+minutes on 92.4 %.
 
-**Task.** Predict `TAXITIME\_SEC\_mvt = MVT\_TIME\_UTC\_mvt − BLOCK\_TIME\_UTC\_mvt` for
-344,841 departures at ten major European airports in January and July 2026,
-training on 4.17 million movements from 2025. Ranked by RMSE in seconds.
-
-**Best official score: 299.23 s** — rank 91 of 191 teams, reached with 8 submissions (the median team used 8 submissions and ranks 134th).
-
-\---
-
-## What this solution is about
-
-The central finding is that the error is not spread evenly across flights.
-**2.9 % of departures produce 71 % of the squared error**, and they split into two
-groups with different causes. Most of the work went into identifying those causes
-rather than into building a larger model.
-
-|Group|What it is|Share of flights|Share of error|RMSE in group|
-|-|-|-:|-:|-:|
-|C — regular|everything recorded properly|97.1 %|35.0 %|195 s|
-|A — no Network Manager record|all NM columns empty|1.56 %|49.3 %|1,822 s|
-|B — late off-block record|NM logs pushback \~25 min late|1.32 %|15.6 %|1,115 s|
-
-Shares are measured in the final model. Group B started at 1,680 s and fell by a third
-once the model was allowed to extrapolate; group A carries half the remaining error and
-is the hard limit of this task.
-
-**Group A.** These departures were never matched to a EUROCONTROL Network Manager
-record — `AOBT\_3\_flt`, `EOBT\_1\_flt`, `LOBT\_flt`, market segment and flight type are
-all missing at once. At some airports the airport system then wrote the *scheduled*
-off-block time into the block-time field. At Rome (LIRF) this happens for **51.4 %**
-of such rows, so the computed taxi-out does not measure taxiing at all — it measures
-the delay of the flight, reaching values of up to 24 hours.
-
-**Group B.** Here the records exist, but the Network Manager off-block time lags the
-airport one by a median of 25 minutes. The aircraft has left the stand while the
-network still considers it parked. These flights cluster strongly in time: the daily
-share varies 5.8× more than chance would produce, and the hour-to-hour correlation is
-0.556 — multi-hour regimes, most likely de-icing in winter and flow restrictions in
-summer.
-
-## Method
-
-Two models, applied to disjoint sets of rows.
-
-**Main model — LightGBM** for departures with a valid NM record. About fifty features
-in six families:
-
-* differences between NM timestamps (`MVT\_TIME − AOBT\_3` alone carries 32 % of the gain)
-* categories: airport, stand, runway, aircraft type, operator, market segment, wake category
-* congestion: movement counts in ±10/30/60 min windows, per airport and per runway;
-runway share of traffic as a proxy for configuration
-* arrival taxi-in in the previous 30 and 60 minutes — a congestion measure that
-survives into the ranking set, since only departure taxi-out was blanked
-* airport regime: mean `MVT\_TIME − AOBT\_3` over recent departures
-* local time with cyclical encoding, METAR observations, and stand-to-runway
-distances computed from OpenStreetMap taxiway geometry
-
-One setting in that model mattered more than every feature combined. A tree returns a
-constant in each leaf, so the ensemble cannot predict a value larger than the largest
-one it saw in training — and that is exactly where half the error lives. LightGBM's
-`linear\_tree` makes the leaves linear functions and removes that ceiling: local RMSE
-364.0 → 338.5, error on long flights 1,666 → 1,181, and on the official score a single
-31.4 s gain, larger than everything else put together.
-
-Two measures usually recommended alongside such a model turned out to be harmful here:
-capping predictions at the per-airport maximum (+19.7 s) and dropping the hardest
-airport from training (+14.6 s). Both cripple a model that can now recognise genuinely
-long flights.
-
-**Special models — three of them** for group A. With every NM column missing, one usable
-variable remains: the delay of the take-off against the schedule, whose correlation with
-the target in this group is 0.854. The relationship is not linear — flat for small
-delays, then rising roughly one-to-one once the delay exceeds a few hours — so a
-per-airport average of a cubic polynomial and a hinge at three hours is fitted. Two more
-models join it: LightGBM with linear leaves, and a mixture in which a classifier
-estimates the probability that a row belongs to the broken regime (AUC 0.956, probability
-shrunk by 0.8) and splits the prediction between the delay and a separate model for the
-remaining rows. Measured in the group: curve 1,908, trees 1,924, average of the two
-1,863, mixture 1,860, all three combined 1,822 s. They fail in different places, so the
-combination wins.
-
-**Validation.** January and July 2025 are held out and the remaining ten months are
-used for training, so the local split mirrors the seasonal composition of the ranking
-set. All history-based features look strictly backwards, and all per-stand statistics
-are computed on the training part only.
+**The real problem, then, is not predicting how long an aircraft taxis. It is
+predicting how much the airport's clock disagrees with EUROCONTROL's about the
+same pushback.** The model takes that 428 s disagreement down to 229 s.
 
 ## Results
 
-|Configuration|Local RMSE|Official RMSE|
-|-|-:|-:|
-|Constant (training median)|520|—|
-|LightGBM alone|531|—|
-|+ special treatment of group A (straight line)|382|—|
-|+ training on flights up to 3 hours|372|—|
-|+ arrival taxi-in and airport regime|371|—|
-|+ cubic curve for group A|364.2|337.5|
-|+ Optuna hyperparameters|361.3|333.1|
-|+ OpenStreetMap stand-to-runway distances|361.0|333.7|
-|+ linear leaves (`linear\_tree`)|331.7|301.8|
-|+ curve-and-trees average for group A|330.5|299.9|
-|**+ classifier mixture for group A**|**324.1**|**299.2**|
+Validation holds out **January and July 2025** and trains on the remaining ten
+months. A random K-fold would put flights from the same day, stand and runway on
+both sides of the split and return an optimistic number that does not survive
+contact with 2026 data.
 
-LightGBM alone scoring worse than a constant is a consequence of the metric: the model
-learns typical values and misses the tail catastrophically, while a constant at least
-does not make those cases worse. Only once the tail is handled separately does the
-model's strength show.
+| | without stand occupancy | with stand occupancy |
+|---|---|---|
+| overall RMSE (full pipeline) | 324.1 | **321.4** |
+| main model, rows with an NM record | 232.5 | **228.7** |
+| group A — no `AOBT_3` (n = 5,373) | 1822.5 | 1822.5 |
+| group B — long, valid `AOBT_3` (n = 4,550) | 1114.5 | 1090.4 |
+| group C — regular (n = 334,496) | 194.7 | **191.9** |
 
-On regular flights the model reaches RMSE 194.7 and MAE 137.7, better than the overall
-score of the leading team, so the entire gap to the top of the leaderboard sits in a few
-thousand atypical rows.
+Official score in the open phase, for the configuration without stand
+occupancy and with a single seed: **299.2342**.
 
-### Local validation versus official score
+### The error is not spread evenly
 
-Seven paired measurements give a result that is useful beyond this competition. The
-official score is consistently better than the local one, by 24.9 to 30.6 seconds, and
-the gap widens slightly as the model improves. The explanation is the composition of the
-tail: the 2026 data contains fewer extreme records than January and July 2025. The better
-the regular flights are handled, the more of the remaining error comes from the tail, and
-the more visible the difference between the two years becomes.
+| group | rows | share of rows | share of squared error |
+|---|---|---|---|
+| A — no Network Manager record at all | 5,373 | 1.6 % | **50.2 %** |
+| B — valid `AOBT_3`, recorded taxi-out over 40 min | 4,550 | 1.3 % | 15.2 % |
+| C — everything else | 334,496 | 97.1 % | 34.6 % |
 
-The practical consequence: changes worth less than about two seconds locally did not
-transfer reliably — the OpenStreetMap distances improved the local score by 0.3 s and
-worsened the official one by 0.6 s. Changes above two seconds transferred every time, and
-transferred amplified. That is the empirical noise floor for this problem, and it is
-higher than one would expect from 344,841 rows, precisely because a few thousand atypical
-rows carry half the score.
-
-## What did not work
-
-Eleven approaches commonly recommended for heavy tails or for enriching the model were
-measured and rejected. Reporting them is as useful as reporting the successful steps.
-
-|Approach|Change in RMSE|Why it failed|
-|-|-:|-|
-|Clipping predictions at 1 hour|+178 s|The extremes exist in the ranking set too|
-|Per-airport prediction cap|+19.7 s|Cripples a model that can now recognise long flights|
-|Dropping the hardest airport from training|+14.6 s|Loses signal that holds elsewhere too|
-|Robust (Huber) regression for group A|+16 s|The extremes there are correct data, not noise|
-|Blending towards a typical value|+6.4 s|Under squared loss the optimum is the conditional mean|
-|Runway service rate and expected queue wait|+1.8 s|The same signal is already carried by the NM time difference|
-|Huber loss in the main model|+1.8 s|RMSE punishes quadratically; softening works against it|
-|Two-stage model with a tail classifier|+0.7 s|The classifier is not confident enough (mean probability 0.43)|
-|Binned conditional mean for group A|+0.6 s|The curve already captures the shape|
-|Congestion normalised per airport|+0.5 s|The model already has the airport as a category|
-|Weather as a whole (METAR)|no change|See below|
-
-Four independent attempts to measure congestion — per-runway movement counts, arrival
-taxi-in, an airport regime indicator and a service-rate queue estimate — all landed
-between −0.8 and +1.8 seconds. The reason is consistent: the difference between take-off
-and the recorded off-block time already contains the *result* of waiting. Congestion
-explains why an aircraft waits; the model does not need the explanation, it already has
-the measurement.
-
-The weather result needs one correction that only emerged late. Measured as a whole,
-METAR features changed nothing. But when the visibility column was accidentally lost
-during a folder migration and the pipeline re-ran without it, the score moved by 4.5
-seconds. Visibility is the one weather variable that carries information here, and
-averaging it together with temperature and precipitation had hidden that. It makes
-physical sense: reduced visibility triggers low-visibility procedures that slow every
-ground movement in that period, while temperature and snow act at the level of a day and
-affect only some flights.
-
-## Repository contents
+By month and group, which is the table that says where the metric really lives:
 
 ```
-taxiout\_final.py      complete pipeline: weather, features, both models, submission file
-osm\_distances.py      stand-to-runway distances from OpenStreetMap (Overpass API)
-check\_osm.py          checks how well OSM stand names match the challenge data
-figures.py            figures used in the write-up
-docs/                 write-up and figures
+                      A                  B                  C          all
+January    2907 (34.1%)       797 ( 3.7%)       181 (13.9%)          346
+July       1206 (16.1%)      1288 (11.5%)       200 (20.8%)          300
 ```
 
-`taxiout\_final.py` runs on its own; it reads `cache/stand\_dist.parquet` if
-`osm\_distances.py` has produced it, and works without it.
+**Group A in January alone is 34 % of the whole metric**, and inside it, two
+rows at Paris carry most of that. See [docs/DATA.md](docs/DATA.md).
 
-## Reproducing
+## What is in the model
+
+Sixty-eight features. The ones that matter, in order of what they were measured
+to be worth:
+
+**Linear leaves** (`linear_tree=True`, `linear_lambda=1.0`) — the largest single
+gain in the whole solution, local RMSE 364.0 → 338.5 and official 333.1 → 301.8.
+A constant-leaf tree cannot predict a value above the largest one in its training
+data, and in this task the error lives precisely above that ceiling. Trees with
+linear models in the leaves extrapolate; trees with constants cannot.
+
+**Stand occupancy** (`occ_h`, `occ_n_24h`) — hours since an *arriving* aircraft
+last went on-block at the same stand, and how many arrivals occupied it in the
+previous 24 hours. Both inputs survive into the prediction set: the departure's
+take-off time, and arrivals' on-block times, which are present for all 670,407
+arrivals there. Worth 4.35 s on rows with an NM record, measured at matched
+round counts. Median taxi-out by occupancy bucket runs 1137 s under half an
+hour, 693 s between half an hour and an hour, 849 s to ninety minutes, 901 s
+between six and twelve — a 444 s spread that no other feature carried.
+
+**A three-model treatment of group A** — a per-airport cubic-plus-hinge curve,
+a linear-leaf LightGBM, and a classifier mixture, combined
+`0.25·curve + 0.25·trees + 0.5·mixture`. Within the group: curve 1908, trees
+1947, mixture 1861, the combination **1822**. Every alternative weighting
+measured worse; see [docs/FINDINGS.md](docs/FINDINGS.md).
+
+**Visibility** — of all weather variables, only visibility measurably helps
+(4.5 s). Low-visibility procedures slow every ground movement in the period.
+Temperature and precipitation act at the level of a whole day and add nothing
+the date features do not already carry.
+
+**Target encoding of stand and runway**, computed on the training split only.
+
+**Stand-to-threshold taxiway distance** from OpenStreetMap: the apron and
+taxiway graph pulled from the Overpass API, then Dijkstra from each stand to
+each runway threshold. 96 % of stand names matched; `check_osm.py` reports the
+rate per airport.
+
+**Five-seed averaging** — `bagging_fraction` and `feature_fraction` make every
+fit random, and averaging n fits removes a (1 − 1/n) share of that variance.
+Measured: one seed 246.82, three seeds 245.27, so five reach 244.96. About
+0.2 s on the official metric. Small, free, and it cannot hurt in expectation.
+
+## Negative results
+
+These cost most of the project's time, and they are the part most likely to be
+useful to someone else. Full numbers in [docs/FINDINGS.md](docs/FINDINGS.md).
+
+1. **Counting movements in a time window does not measure congestion.** Seven
+   independent attempts — departures, all movements, per runway, several window
+   lengths — landed between −0.8 and +1.8 s. The reason is that a count inside a
+   window measures *demand*, while queueing delay follows the rate of *service*.
+   The gap between consecutive take-offs on a runway does measure service, and
+   separates median taxi-out from 1320 s at a 45–60 s mean gap down to 837 s
+   above 400 s. It still did not help the model, for the reason in point 2.
+2. **Four ground-sequence features made the model worse**, by 4.56 s at a
+   matched round count, while costing 6.8× the training time. `gap_rwy` is
+   partly determined by the take-off time of the flight being predicted, so it
+   measures an outcome rather than a cause — the same trap as `proxy`.
+3. **The apparent −738 s bias in group B is a regression fallacy.** Group B is
+   defined by `y > 2400`, which conditions on the truth; under that conditioning
+   even a perfect conditional-mean estimator looks shrunk toward the centre.
+   Conditioned on the *prediction*, which is all that exists at prediction time,
+   the model is already calibrated: `E[y | ŷ] − ŷ` is about +10 s across the
+   bulk and turns **negative** in the top bin. Isotonic recalibration on
+   1,723,531 out-of-fold rows made it much worse (242.2 → 267.4), linear
+   recalibration slightly worse, and every multiplicative correction that helped
+   group B cost more in group C.
+4. **Isotonic calibration of the group A classifier gained nothing.** The Brier
+   score improved, 0.0404 → 0.0390, and RMSE did not: 1825 against 1822.
+5. **Every procedure that softens extremes hurt.** RMSE's optimum is the
+   conditional mean, so a robust (Huber) fit on group A measured 2178 against
+   1908, and clipping the training target at 3600 s instead of 10800 s cost
+   10 s.
+6. **Hedging rare extremes is mathematically futile.** For a fraction q of rows
+   that jump by Δ, the best constant shift reduces MSE by a factor of only
+   (1 − q). With q ≈ 0.002 there is nothing to win; such rows must be
+   *identified*, not insured against.
+7. **The 2024-challenge tail hypothesis was dropped.** An earlier draft claimed
+   the 2026 tail was milder than 2025's. That was never measured and has been
+   removed rather than restated.
+
+## Two methodological mistakes, kept on the record
+
+**A contaminated A/B.** Five feature sets were compared while early stopping
+chose the number of boosting rounds separately in each, from 603 to 1586. The
+arm with the most rounds had the best RMSE and the arm with the fewest had
+nearly the worst, so the comparison measured two things at once and attributed
+both to the features. `sweep.py` exists to fix this: it trains each arm once to
+a fixed 2600 rounds with early stopping off, then scores every arm at the same
+grid of round counts using `num_iteration` on the same booster. The corrected
+table is in [docs/FINDINGS.md](docs/FINDINGS.md). It also showed the round count
+barely matters above 1500 — 0.64 s across 1100 rounds — while below it the curve
+falls away by 4 s.
+
+**Microseconds, twice.** The timestamps are microseconds. Dividing by `10**9`
+instead of `10**6` compresses every interval by a factor of a thousand, which
+turns a one-hour congestion window into seven days and a median stand occupancy
+of 1.68 h into six seconds. It happened once in the congestion features, where
+it invalidated a published conclusion that congestion was useless, and again in
+the occupancy feature, where it made a working feature look empty. Both are
+flagged in the code where the divisor appears.
+
+## Reproducing this
 
 ```bash
-pip install pandas numpy pyarrow lightgbm optuna requests
-
-# 1. stand-to-runway distances (optional, writes cache/stand\_dist.parquet)
-python osm\_distances.py
-
-# 2. everything else: METAR download, features, validation, submission file
-#    set DATA\_DIR and TEAM\_NAME at the top of the file first
-python taxiout\_final.py
+pip install pandas numpy pyarrow lightgbm requests
+mkdir data                      # put the challenge parquet files here
+python osm_distances.py         # optional, writes cache/stand_dist.parquet
+python taxiout.py               # weather, features, validation, submission
 ```
 
-Hyperparameters found by a 100-trial Optuna search are hard-coded as defaults, so the
-reported result is reproducible without repeating the search. Set `RUN\_OPTUNA = True` to
-run it again; it takes several hours and stores its state in `optuna\_taxiout.db`, so it
-can be interrupted and resumed.
+`taxiout.py` runs in four steps and caches aggressively: METAR weather once,
+features once per code version, then validation and the submission. On sixteen
+cores the whole run is about 25 minutes, most of it the five seeds.
 
-The pipeline fetches METAR data itself, computes features in parallel across the twelve
-monthly files and caches them, validates on January and July 2025, retrains on the full
-year and writes `<team-name>\_v<n>.parquet` after five validity checks (row count,
-identifier match, column names, missing and infinite values).
+The settings at the top of the file are the knobs. `DATA_DIR`, `TEAM_NAME`,
+`RANK_FILE` and `SUB_FILE` point at the data; `SEEDS`, `BEST_ITER`,
+`USE_OCCUPANCY` and `VALID_MONTHS` change the model. `RUN_OPTUNA = True`
+re-runs the 100-trial hyperparameter search, which takes hours; its result is
+hard-coded as the default so the published numbers reproduce without it.
 
-Re-runs are fast because features and weather are read from `cache/`. The cache carries
-a version marker and is rebuilt automatically when the feature code changes.
+```bash
+python sweep.py                 # feature sets × round counts, matched
+python finalize.py              # name the final file and verify it
+python upload.py <file>         # upload, then read the bucket back
+```
 
-## Data and external sources
+| file | what it does |
+|---|---|
+| `taxiout.py` | the whole pipeline: weather, features, both models, submission |
+| `sweep.py` | compares feature sets at matched round counts |
+| `finalize.py` | renames the chosen submission and runs nine validity checks |
+| `upload.py` | uploads and verifies, reading credentials from outside the file |
+| `osm_distances.py` | OpenStreetMap taxiway graph → stand-to-threshold distances |
+| `check_osm.py` | reports the stand-name match rate per airport |
+| `figures.py` | the figures, from the feature cache |
 
-Challenge data (movement records joined with EUROCONTROL Network Manager records) is
-supplied by the organisers and is **not** redistributed here; obtain it through your own
-team bucket.
+### Documentation
 
-External sources, all openly licensed:
+| file | what is in it |
+|---|---|
+| [docs/METHOD.md](docs/METHOD.md) | the pipeline, the split, the features, the hyperparameters, the caching |
+| [docs/FINDINGS.md](docs/FINDINGS.md) | every measurement, positive and negative, with the tables |
+| [docs/DATA.md](docs/DATA.md) | the two data-quality mechanisms and the rows that cannot be predicted |
 
-* **Iowa Environmental Mesonet** — ASOS/METAR archive, hourly observations for the ten airports
-* **OpenStreetMap contributors** — parking positions, taxiways and runways, via the Overpass API (ODbL)
+### The data is not here
 
+The challenge dataset is not redistributable under its licence, so `data/` is in
+`.gitignore` and nothing derived from it is committed. The weather comes from the
+Iowa Environmental Mesonet METAR archive and the airport layouts from
+OpenStreetMap; both are fetched by the scripts.
 
+### Two traps worth knowing about before you run it
+
+`MVT_ID_mvt` must not be stored as `float32`. The identifiers have nine digits
+and `float32` holds about seven, so distinct flights collapse onto one id — it
+once turned 344,841 unique identifiers into 22,048 and produced a submission
+that was silently invalid. `finalize.py` checks the dtype directly, because a
+round-trip test does not catch it: once collapsed, the values agree with
+themselves.
+
+Credentials belong in `keys.txt` or in environment variables, never in a
+committed file. Keys that have been pasted anywhere should be rotated at
+<https://s3-console.opensky-network.org/access-keys>.
+
+## Attribution of ideas
+
+Two ideas came from the public write-up of team **kind-mango** rather than from
+this work: treating the rows with no Network Manager record as a separate
+population, and using the schedule-to-take-off difference as the main predictor
+inside that population. The implementation here — the three-model combination,
+the per-airport curve and the classifier mixture — is this project's own, but the
+framing is not, and it would be dishonest to present it as such.
+
+The decision to use `AOBT_3_flt` at all deserves a note. It is EUROCONTROL's
+actual off-block time, which means the feature `proxy = MVT_TIME - AOBT_3` is a
+measurement of the same physical event as the target. It is in the provided data
+and the rules permit it, but anyone reading these numbers as evidence about
+operational taxi-out prediction should know that this one feature carries most of
+the signal, and that a forecasting system would not have it.
 
 ## Licence
 
-GNU General Public License v3.0 only, as required for prize eligibility. See `LICENSE`.
-
-OpenStreetMap-derived data is subject to the Open Database License; METAR observations
-are in the public domain.
-
+GNU General Public License v3.0 only. See [LICENSE](LICENSE).
